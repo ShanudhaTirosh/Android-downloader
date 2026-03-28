@@ -183,5 +183,4 @@ jobs:
             ### ✅ Requirements
             - Android 7.0+ (API 24+)
           files: bin/ShanuFxDownloader.apk
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+       
