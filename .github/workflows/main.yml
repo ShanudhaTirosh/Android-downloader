@@ -168,19 +168,3 @@ jobs:
           files: bin/ShanuFxDownloader.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          name: "Shanu Fx Downloader ${{ github.ref_name }}"
-          body: |
-            ## 📱 Shanu Fx Downloader ${{ github.ref_name }}
-
-            ### 📥 Tap `ShanuFxDownloader.apk` below to download
-
-            ### 📲 Installation
-            1. Download the APK to your Android phone
-            2. Tap it and allow installation from unknown sources
-            3. Tap **Install**
-
-            ### ✅ Requirements
-            - Android 7.0+ (API 24+)
-          files: bin/ShanuFxDownloader.apk
-       
