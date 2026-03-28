@@ -1,0 +1,9 @@
+# Shanu Fx Downloader - Android Requirements
+# For local testing on desktop: pip install -r requirements.txt
+# For APK build: requirements are in buildozer.spec
+
+kivy>=2.3.0
+yt-dlp>=2024.1.1
+requests>=2.31.0
+Pillow>=10.0.0
+certifi>=2024.1.1
