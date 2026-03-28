@@ -6,41 +6,59 @@ on:
     tags:     [ "v*.*.*" ]
   workflow_dispatch:
 
+# FIX 5: grant write permission so the release step can create/upload releases
+permissions:
+  contents: write
+
 jobs:
   build-apk:
     runs-on: ubuntu-22.04
 
     steps:
 
+      # ── 1. Checkout ──────────────────────────────────────────────────────────
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # ── 2. Extract zip ───────────────────────────────────────────────────────
       - name: Extract ShanuFxAndroid.zip
         run: |
+          # -o = overwrite silently (no interactive prompt)
           unzip -o -q ShanuFxAndroid.zip
           cp -r ShanuFxAndroid/. .
           rm -rf ShanuFxAndroid
+          echo "── Contents after extraction ──"
+          ls -la
 
+      # ── 3. Python ────────────────────────────────────────────────────────────
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
+      # ── 4. System packages ───────────────────────────────────────────────────
       - name: Install system packages
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y \
+          sudo apt-get install -y --no-install-recommends \
             git zip unzip openjdk-17-jdk \
             python3-pip autoconf libtool pkg-config \
             zlib1g-dev libncurses5-dev libncursesw5-dev \
             libtinfo5 cmake libffi-dev libssl-dev \
-            lld ccache
+            lld ccache wget
 
+      # FIX 4: set JAVA_HOME only once, here, so it's available for all later steps
+      - name: Set JAVA_HOME
+        run: echo "JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64" >> $GITHUB_ENV
+
+      # ── 5. Buildozer ─────────────────────────────────────────────────────────
       - name: Install Buildozer
         run: |
           pip install --upgrade pip
           pip install buildozer cython==0.29.36
 
+      # FIX 1: Cache comes BEFORE the SDK install step so a cache hit is detected
+      # before we decide whether to download cmdline-tools
       - name: Cache Buildozer global directory
         uses: actions/cache@v4
         with:
@@ -51,20 +69,67 @@ jobs:
           restore-keys: |
             buildozer-${{ runner.os }}-
 
-      - name: Pre-accept Android SDK licenses
+      # FIX 8: Only download cmdline-tools when sdkmanager is actually missing
+      # (i.e. first run / cache miss). On cache hits this step is instant.
+      - name: Install Android cmdline-tools (only if missing)
         run: |
-          mkdir -p ~/.buildozer/android/platform/android-sdk/licenses
-          echo -e "\n24333f8a63b6825ea9c5514f83c2829b004d1fee" > ~/.buildozer/android/platform/android-sdk/licenses/android-sdk-license
-          echo -e "\n84831b9409646a918e30573bab4c9c91346d8abd" > ~/.buildozer/android/platform/android-sdk/licenses/android-sdk-preview-license
+          SDK_DIR="$HOME/.buildozer/android/platform/android-sdk"
+          SDKMANAGER_LEGACY="$SDK_DIR/tools/bin/sdkmanager"
 
+          if [ -f "$SDKMANAGER_LEGACY" ]; then
+            echo "✅ sdkmanager already present — skipping download"
+          else
+            echo "⬇️  sdkmanager not found — downloading cmdline-tools..."
+            mkdir -p "$SDK_DIR"
+            wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip \
+              -O /tmp/cmdline-tools.zip
+            unzip -q /tmp/cmdline-tools.zip -d /tmp/cmdline-tools-raw
+
+            mkdir -p "$SDK_DIR/cmdline-tools/latest"
+            cp -r /tmp/cmdline-tools-raw/cmdline-tools/. "$SDK_DIR/cmdline-tools/latest/"
+            rm -rf /tmp/cmdline-tools.zip /tmp/cmdline-tools-raw
+
+            # Create the legacy tools/bin/sdkmanager symlink Buildozer looks for
+            mkdir -p "$SDK_DIR/tools/bin"
+            ln -sf "$SDK_DIR/cmdline-tools/latest/bin/sdkmanager" "$SDKMANAGER_LEGACY"
+            echo "✅ sdkmanager installed"
+          fi
+
+          # Verify it works
+          "$SDKMANAGER_LEGACY" --version
+
+      # FIX 9: Licenses written after SDK dir is guaranteed to exist
+      - name: Accept Android SDK licenses
+        run: |
+          SDK_DIR="$HOME/.buildozer/android/platform/android-sdk"
+          mkdir -p "$SDK_DIR/licenses"
+          printf '\n24333f8a63b6825ea9c5514f83c2829b004d1fee\n' > "$SDK_DIR/licenses/android-sdk-license"
+          printf '\n84831b9409646a918e30573bab4c9c91346d8abd\n' > "$SDK_DIR/licenses/android-sdk-preview-license"
+          printf '\nd975f751698a77b662f1254ddbeed3901e976f5a\n' > "$SDK_DIR/licenses/intel-android-extra-license"
+          printf '\n601085b94cd77f0b54ff86406957099ebe79c4d7\n' > "$SDK_DIR/licenses/android-googletv-license"
+          printf '\n33b6a2b64607f11b759f320ef9dff4ae5c47d97a\n' > "$SDK_DIR/licenses/google-gdk-license"
+          echo "✅ All SDK licenses accepted"
+
+      # FIX 2 & 3: Use $HOME (not ${{ env.HOME }}) for ANDROID_SDK_ROOT,
+      # and add pipefail so buildozer failures are not swallowed by tee
       - name: Build APK
-        run: buildozer -v android debug 2>&1 | tee build.log
+        run: |
+          set -o pipefail
+          buildozer -v android debug 2>&1 | tee build.log
         env:
           JAVA_HOME: /usr/lib/jvm/java-17-openjdk-amd64
+          ANDROID_SDK_ROOT: /home/runner/.buildozer/android/platform/android-sdk
 
+      # FIX 7: Safety check — fail with a clear message if APK was not produced
       - name: Rename APK
         run: |
-          cp $(find bin/ -name "*.apk" | head -1) bin/ShanuFxDownloader.apk
+          APK=$(find bin/ -name "*.apk" | head -1)
+          if [ -z "$APK" ]; then
+            echo "❌ No APK found in bin/ — build may have failed"
+            exit 1
+          fi
+          cp "$APK" bin/ShanuFxDownloader.apk
+          echo "✅ APK ready: $(du -sh bin/ShanuFxDownloader.apk | cut -f1)"
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
@@ -73,6 +138,7 @@ jobs:
           path: bin/ShanuFxDownloader.apk
           retention-days: 7
 
+      # FIX 6: if-no-files-found: ignore so this never crashes even if build.log is missing
       - name: Upload build log on failure
         if: failure()
         uses: actions/upload-artifact@v4
@@ -80,10 +146,28 @@ jobs:
           name: build-log
           path: build.log
           retention-days: 3
+          if-no-files-found: ignore
 
       - name: Create GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
+        with:
+          name: "Shanu Fx Downloader ${{ github.ref_name }}"
+          body: |
+            ## 📱 Shanu Fx Downloader ${{ github.ref_name }}
+
+            ### 📥 Tap `ShanuFxDownloader.apk` below to download
+
+            ### 📲 Installation
+            1. Download the APK to your Android phone
+            2. Tap it and allow installation from unknown sources
+            3. Tap **Install**
+
+            ### ✅ Requirements
+            - Android 7.0+ (API 24+)
+          files: bin/ShanuFxDownloader.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           name: "Shanu Fx Downloader ${{ github.ref_name }}"
           body: |
